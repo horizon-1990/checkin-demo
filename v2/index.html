@@ -167,6 +167,10 @@ body{font-family:var(--sans);color:var(--ink);background:var(--board);display:fl
 .set-row .v span{font-family:var(--serif);font-size:15px;color:var(--muted)}
 .about{padding:22px;font-family:var(--sans);font-size:12px;color:var(--muted);line-height:1.8}
 .about b{color:var(--ink2)}
+.notice{padding:12px 22px;font-family:var(--sans);font-size:12px;color:var(--muted);line-height:1.7;background:var(--gpale);border-left:3px solid var(--green);margin:14px 22px 0;border-radius:0 8px 8px 0}
+.notice b{color:var(--ink2)}
+.mini-btn{border:1px solid var(--line);background:var(--white);color:var(--green);border-radius:8px;padding:6px 12px;font-size:12px;font-family:var(--sans);cursor:pointer}
+.mini-btn:disabled{opacity:.5;cursor:default}
 
 /* 弹窗 */
 .mask{position:absolute;inset:0;background:rgba(31,40,35,.32);display:none;align-items:flex-end;z-index:30}
@@ -331,6 +335,22 @@ body{font-family:var(--sans);color:var(--ink);background:var(--board);display:fl
     <div class="panel-title">任 务 管 理</div>
     <div id="taskManage"></div>
     <div class="set-row" id="btnAddTask"><div class="k" style="color:var(--green)">+ 新建任务</div></div>
+    <div class="panel-title">提 醒 与 闹 铃</div>
+    <div class="set-row" id="notifyRow">
+      <div class="k">系统通知（页面在前台/后台时）</div>
+      <div class="v"><span id="notifyState">未开启</span></div>
+    </div>
+    <div class="set-row" id="testNotifyRow">
+      <div class="k" style="color:var(--green)">发送一条测试通知</div>
+    </div>
+    <div class="set-row" id="exportIcsRow">
+      <div class="k" style="color:var(--green)">导出闹铃到系统日历（.ics）</div>
+    </div>
+    <div class="notice" id="notifyNotice">
+      <b>两种提醒怎么选？</b><br>
+      ① <b>系统通知</b>：开启后，在 App 打开或后台运行时，到点会弹系统通知（带震动/声音）。<br>
+      ② <b>系统日历闹铃</b>：导出 .ics 用手机日历打开，到点由<b>系统闹钟</b>响铃——即使 App 完全关闭也会响，这是最可靠的方式。修改任务后请重新导出一次。
+    </div>
     <div class="panel-title">云 端 存 储</div>
     <div class="set-row" id="cloudRow">
       <div class="k">GitHub Gist 同步</div>
@@ -969,7 +989,7 @@ function switchPage(p){
   document.getElementById('fab').style.display=(p==='today'?'flex':'none');
   if(p==='stat') renderStat();
   if(p==='heat') renderHeat();
-  if(p==='set') renderTaskManage();
+  if(p==='set') { renderTaskManage(); updateNotifyUI(); }
 }
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>switchPage(t.dataset.page));
 document.getElementById('calToggle').onclick=()=>calOpen?closeCalendar():openCalendar();
@@ -1029,6 +1049,17 @@ document.getElementById('btnDelete').onclick=()=>{
   for(const k in state.logs) state.logs[k]=state.logs[k].filter(id=>id!==editingId);
   save();closeSheet();renderCheck();renderStat();renderCalendarIfOpen();renderTaskManage();
 };
+// 提醒与闹铃
+document.getElementById('notifyRow').onclick=requestNotify;
+document.getElementById('testNotifyRow').onclick=()=>{
+  if(notificationState()!=='granted'){ alert('请先点上面的「系统通知」开启权限。'); return; }
+  notify('⏰ 日课 · 测试通知',{
+    body:'这是一条测试提醒。到点打卡时会收到这样的系统通知。',
+    tag:'rike-test-'+Date.now(), requireInteraction:true
+  });
+};
+document.getElementById('exportIcsRow').onclick=exportICS;
+
 // 云端配置
 document.getElementById('syncDotTop').onclick=showCloudSetup;
 document.getElementById('cloudRow').onclick=showCloudSetup;
@@ -1061,6 +1092,178 @@ document.getElementById('btnConnect').onclick=async()=>{
   }
 };
 
+/* ============ 系统通知：应用在前台/后台时的提醒 ============ */
+const NOTIFY_KEY='rike_notify_enabled';
+const FIRED_KEY='rike_notify_fired';
+let notifyTimer=null;
+
+function notifyEnabled(){ return localStorage.getItem(NOTIFY_KEY)==='1'; }
+function notificationState(){ return ('Notification' in window)?Notification.permission:'unsupported'; }
+function updateNotifyUI(){
+  const s=notificationState();
+  const label=document.getElementById('notifyState');
+  if(!label) return;
+  if(s==='granted') label.textContent=notifyEnabled()?'已开启':'已授权 · 待开启';
+  else if(s==='denied') label.textContent='浏览器已拒绝';
+  else if(s==='unsupported') label.textContent='此浏览器不支持';
+  else label.textContent='未开启';
+}
+async function requestNotify(){
+  const s=notificationState();
+  if(s==='unsupported'){ alert('此浏览器不支持系统通知。iOS 请确保已“添加到主屏幕”并使用 Safari 16.4+。'); return; }
+  if(s==='denied'){ alert('通知权限已被浏览器拒绝。请到浏览器设置 → 该网站 → 通知，改为允许。'); return; }
+  if(s==='granted'){
+    const on=!notifyEnabled();
+    localStorage.setItem(NOTIFY_KEY,on?'1':'0');
+    updateNotifyUI();
+    if(on){ startNotifyLoop(); notify('日课','系统通知已开启，到点会准时提醒你。',{tag:'rike-test'}); }
+    else stopNotifyLoop();
+    return;
+  }
+  const perm=await Notification.requestPermission();
+  if(perm==='granted'){
+    localStorage.setItem(NOTIFY_KEY,'1');
+    updateNotifyUI(); startNotifyLoop();
+    notify('日课','系统通知已开启，到点会准时提醒你。',{tag:'rike-test'});
+  }else updateNotifyUI();
+}
+function notify(title,opts){
+  if(notificationState()!=='granted') return Promise.resolve(false);
+  const base={icon:'./icon-192.png',badge:'./icon-192.png',vibrate:[200,100,200],renotify:true,...opts};
+  if('serviceWorker' in navigator){
+    return navigator.serviceWorker.ready.then(reg=>{
+      if(reg&&reg.showNotification) return reg.showNotification(title,base).then(()=>true).catch(()=>false);
+      return showLegacyNotify(title,base);
+    }).catch(()=>showLegacyNotify(title,base));
+  }
+  return Promise.resolve(showLegacyNotify(title,base));
+}
+function showLegacyNotify(title,opts){
+  try{ const n=new Notification(title,opts); if(opts&&opts.tag)n.tag=opts.tag; return true; }catch(e){ return false; }
+}
+function firedSet(){
+  try{ const o=JSON.parse(localStorage.getItem(FIRED_KEY)||'{}'); const today=todayStr(); return new Set(o[today]||[]); }
+  catch(e){ return new Set(); }
+}
+function markFired(key){
+  try{
+    const o=JSON.parse(localStorage.getItem(FIRED_KEY)||'{}'); const today=todayStr();
+    const arr=o[today]||[]; if(!arr.includes(key)) arr.push(key);
+    // 只保留最近 3 天
+    const clean={}; clean[today]=arr;
+    const keys=Object.keys(o).sort().slice(-2);
+    keys.forEach(k=>{ if(k!==today) clean[k]=o[k]; });
+    localStorage.setItem(FIRED_KEY,JSON.stringify(clean));
+  }catch(e){}
+}
+function checkReminders(){
+  if(!notifyEnabled()||notificationState()!=='granted') return;
+  const now=new Date();
+  const hhmm=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  const today=todayStr(), done=doneOn(today), fired=firedSet();
+  state.tasks.forEach(tk=>{
+    if(!tk.reminds||!tk.reminds.length) return;
+    if(!needOn(tk,today)) return;
+    if(done.includes(tk.id)) return;
+    tk.reminds.forEach(t=>{
+      if(!t||t!==hhmm) return;
+      const key=tk.id+'@'+t;
+      if(fired.has(key)) return;
+      markFired(key);
+      const c=catOf(tk.category);
+      notify('⏰ '+tk.name,{
+        body:cycleText(tk.cycle)+' · '+c.name+' · 今天还没打卡',
+        tag:'rike-'+key,
+        requireInteraction:true,
+        data:{taskId:tk.id,date:today}
+      });
+    });
+  });
+}
+function startNotifyLoop(){
+  stopNotifyLoop();
+  if(!notifyEnabled()||notificationState()!=='granted') return;
+  checkReminders();
+  notifyTimer=setInterval(checkReminders,20000);
+  document.addEventListener('visibilitychange',onVisibleChange);
+}
+function stopNotifyLoop(){
+  if(notifyTimer){ clearInterval(notifyTimer); notifyTimer=null; }
+  document.removeEventListener('visibilitychange',onVisibleChange);
+}
+function onVisibleChange(){ if(!document.hidden) checkReminders(); }
+// 通知点击后回到 App（由 Service Worker 消息触发）
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.addEventListener('message',e=>{
+    if(e.data&&e.data.type==='notify-open'){ switchPage('today'); window.focus&&window.focus(); }
+  });
+}
+
+/* ============ 系统日历闹铃：导出 .ics（含 VALARM） ============ */
+function icsEscape(s){ return String(s).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\r?\n/g,'\\n'); }
+function icsFold(line){
+  const encoder=new TextEncoder();
+  if(encoder.encode(line).length<=74) return line;
+  const chars=Array.from(line); let cur='',len=0,out='';
+  chars.forEach(ch=>{
+    const n=encoder.encode(ch).length;
+    if(len+n>73){ out+=cur+'\r\n '; cur=ch; len=n; }
+    else { cur+=ch; len+=n; }
+  });
+  return out+cur;
+}
+function icsStamp(d){
+  return d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+
+    'T'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0')+String(d.getSeconds()).padStart(2,'0')+'Z';
+}
+function buildICS(){
+  const L=[];
+  const p=s=>L.push(icsFold(s));
+  p('BEGIN:VCALENDAR'); p('VERSION:2.0'); p('PRODID:-//DailyLessons//Rike//CN');
+  p('CALSCALE:GREGORIAN'); p('METHOD:PUBLISH'); p('X-WR-CALNAME:日课 · 打卡闹铃');
+  const stamp=icsStamp(new Date());
+  let count=0;
+  state.tasks.forEach(tk=>{
+    if(!tk.reminds||!tk.reminds.length) return;
+    const c=tk.cycle;
+    let rrule='FREQ=DAILY';
+    if(c.type==='weekly'&&c.days&&c.days.length) rrule='FREQ=WEEKLY;BYDAY='+c.days.map(d=>['SU','MO','TU','WE','TH','FR','SA'][d]).join(',');
+    else if(c.type==='monthly'&&c.days&&c.days.length) rrule='FREQ=MONTHLY;BYMONTHDAY='+c.days.slice().sort((a,b)=>a-b).join(',');
+    else if(c.type==='interval') rrule='FREQ=DAILY;INTERVAL='+(c.n||3);
+    const base=tk.start||tk.created||todayStr();
+    const until=tk.end||MAX;
+    tk.reminds.forEach((time,i)=>{
+      if(!time) return;
+      const hm=time.replace(':','');
+      p('BEGIN:VEVENT');
+      p('UID:'+tk.id+'-'+i+'-'+hm+'@rike-daily');
+      p('DTSTAMP:'+stamp);
+      p('DTSTART;TZID=Asia/Shanghai:'+base.replace(/-/g,'')+'T'+hm+'00');
+      p('RRULE:'+rrule+';UNTIL='+until.replace(/-/g,'')+'T235900');
+      p('SUMMARY:'+icsEscape(tk.name+' · 日课打卡'));
+      p('DESCRIPTION:'+icsEscape(cycleText(tk.cycle)+' · '+catOf(tk.category).name));
+      // 系统闹铃（iOS / 安卓原生响铃，App 关闭也会响）
+      p('BEGIN:VALARM'); p('ACTION:DISPLAY'); p('DESCRIPTION:'+icsEscape('该打卡了：'+tk.name)); p('TRIGGER:-PT0M'); p('END:VALARM');
+      p('BEGIN:VALARM'); p('ACTION:AUDIO'); p('TRIGGER:-PT0M'); p('ATTACH;VALUE=URI:Basso'); p('END:VALARM');
+      p('END:VEVENT'); count++;
+    });
+  });
+  p('END:VCALENDAR');
+  return {text:L.join('\r\n')+'\r\n',count};
+}
+function exportICS(){
+  const anyRemind=state.tasks.some(t=>t.reminds&&t.reminds.length);
+  if(!anyRemind){ alert('还没有任何任务设置了提醒时间。请先在任务编辑里添加提醒。'); return; }
+  const r=buildICS();
+  const blob=new Blob([r.text],{type:'text/calendar;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='日课打卡闹铃.ics';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  const n=document.getElementById('notifyNotice');
+  if(n) n.innerHTML='<b>已导出 '+r.count+' 条闹铃。</b><br>用手机日历打开这个 .ics 文件并导入，到点会由系统闹钟响铃（App 关闭也会响）。修改任务后请重新导出。';
+}
+
 /* ============ 启动 ============ */
 state=load();
 renderToday();renderDates();renderCheck();renderStat();renderHeat();renderTaskManage();
@@ -1069,6 +1272,8 @@ if(location.hash==='#heat')switchPage('heat');
 if(location.hash==='#set')switchPage('set');
 if(location.hash==='#cal'){switchPage('today');openCalendar();}
 if(location.hash==='#edit')openSheet(null);
+updateNotifyUI();
+if(notifyEnabled()&&notificationState()==='granted') startNotifyLoop();
 initCloud();
 
 /* ============ PWA Service Worker ============ */

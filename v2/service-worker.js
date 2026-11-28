@@ -38,3 +38,19 @@ self.addEventListener('fetch', e => {
     })
   );
 });
+
+/* 通知点击：回到 App 的今日页 */
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+      for (const c of clients) {
+        if (c.url.indexOf(self.registration.scope) === 0 && 'focus' in c) {
+          c.postMessage({ type: 'notify-open' });
+          return c.focus();
+        }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow('./#today');
+    })
+  );
+});
